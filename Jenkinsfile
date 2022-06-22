@@ -3,12 +3,12 @@ pipeline {
 
 	//Configure the following environment variables before executing the Jenkins Job	
 	environment {
-		IntegrationFlowID = "IntegrationFlow1"
+		IntegrationFlowID = "test1"
 		CPIHost = "${env.CPI_HOST}"
 		CPIOAuthHost = "${env.CPI_OAUTH_HOST}"
 		CPIOAuthCredentials = "${env.CPI_OAUTH_CRED}"	
 		GITRepositoryURL  = "${env.GIT_REPOSITORY_URL}"
-		GITCredentials = "${env.GIT_CRED}"
+		
 		GITBranch = "${env.GIT_BRANCH_NAME}"
 		GITFolder = "IntegrationContent/IntegrationArtefacts"
 		GITComment = "Integration Artefacts update from CICD pipeline"

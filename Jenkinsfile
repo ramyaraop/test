@@ -4,10 +4,10 @@ pipeline {
 	//Configure the following environment variables before executing the Jenkins Job	
 	environment {
 		IntegrationFlowID = "test1"
-		CPIHost = "${env.CPI_HOST}"
-		CPIOAuthHost = "${env.CPI_OAUTH_HOST}"
+		CPIHost = "https://f46f9be9trial.it-cpitrial05.cfapps.us10-001.hana.ondemand.com"
+		CPIOAuthHost = "https://f46f9be9trial.authentication.us10.hana.ondemand.com/oauth/token"
 		CPIOAuthCredentials = "${env.CPI_OAUTH_CRED}"	
-		GITRepositoryURL  = "${env.GIT_REPOSITORY_URL}"
+		GITRepositoryURL  = "https://github.com/ramyaraop/test.git"
 		
 		GITBranch = "${env.main}"
 		GITFolder = "IntegrationContent/IntegrationArtefacts"

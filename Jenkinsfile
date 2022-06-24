@@ -1,96 +1,130 @@
 pipeline {
-	agent any
+  agent any
 
-	//Configure the following environment variables before executing the Jenkins Job	
-	environment {
-		IntegrationFlowID = "test1"
-		CPIHost = "https://f46f9be9trial.it-cpitrial05.cfapps.us10-001.hana.ondemand.com"
-		CPIOAuthHost = "https://f46f9be9trial.authentication.us10.hana.ondemand.com/oauth/token"
-		CPIOAuthCredentials = "${env.CPI_OAUTH_CRED}"	
-		GITRepositoryURL  = "https://github.com/ramyaraop/test.git"
-		
-		GITBranch = "${env.main}"
-		GITFolder = "IntegrationContent/IntegrationArtefacts"
-		GITComment = "Integration Artefacts update from CICD pipeline"
-   	}
-	
-	stages {
-		stage('download integration artefact and store it in Git') {
-			steps {
-			 	deleteDir()
-				script {
-					//clone repo 
-					checkout([
-						$class: 'GitSCM',
-						branches: [[name: env.GITBranch]],
-						doGenerateSubmoduleConfigurations: false,
-						extensions: [
-							[$class: 'RelativeTargetDirectory',relativeTargetDir: "."],
-							[$class: 'SparseCheckoutPaths',  sparseCheckoutPaths:[[$class:'SparseCheckoutPath', path: env.GITFolder]]]
-						],
-						submoduleCfg: [],
-						userRemoteConfigs: [[
-							credentialsId: env.GITCredentials,
-							url: 'https://' + env.GITRepositoryURL
-						]]
-					])
-					
-					//get token
-					println("Request token");
-					def token;
-					try{
-					def getTokenResp = httpRequest acceptType: 'APPLICATION_JSON', 
-						authentication: env.CPIOAuthCredentials, 
-						contentType: 'APPLICATION_JSON', 
-						httpMode: 'POST', 
-						responseHandle: 'LEAVE_OPEN', 
-						timeout: 30, 
-						url: 'https://' + env.CPIOAuthHost + '/oauth/token?grant_type=client_credentials';
-					def jsonObjToken = readJSON text: getTokenResp.content
-					token = "Bearer " + jsonObjToken.access_token
-				   	} catch (Exception e) {
-						error("Requesting the oauth token for Cloud Integration failed:\n${e}")
-					}
-					//delete the old flow content so that only the latest content gets stored
-					dir(env.GITFolder + '/' + env.IntegrationFlowID){
-						deleteDir();
-					}
-					//download and extract artefact from tenant
-					println("Downloading artefact");
-					def tempfile = UUID.randomUUID().toString() + ".zip";
-					def cpiDownloadResponse = httpRequest acceptType: 'APPLICATION_ZIP', 
-						customHeaders: [[maskValue: false, name: 'Authorization', value: token]], 
-						ignoreSslErrors: false, 
-						responseHandle: 'LEAVE_OPEN', 
-						validResponseCodes: '100:399, 404',
-						timeout: 30,  
-						outputFile: tempfile,
-						url: 'https://' + env.CPIHost + '/api/v1/IntegrationDesigntimeArtifacts(Id=\''+ env.IntegrationFlowID + '\',Version=\'active\')/$value';
-					if (cpiDownloadResponse.status == 404){
-						//invalid Flow ID
-						error("Received http status code 404. Please check if the Artefact ID that you have provided exists on the tenant.");
-					}
-					def disposition = cpiDownloadResponse.headers.toString();
-					def index=disposition.indexOf('filename')+9;
-					def lastindex=disposition.indexOf('.zip', index);
-					def filename=disposition.substring(index + 1, lastindex + 4);
-					def folder=env.GITFolder + '/' + filename.substring(0, filename.indexOf('.zip'));
-					fileOperations([fileUnZipOperation(filePath: tempfile, targetLocation: folder)])
-					cpiDownloadResponse.close();
+  //Configure the following environment variables before executing the Jenkins Job
+  environment {
+    IntegrationFlowID = "test1"
+    GetEndpoint = true //If you don't need the endpoint or the artefact does not provide an endpoint, set the value to false
+    DeploymentCheckRetryCounter = 20 //multiply by 3 to get the maximum deployment time
+	  CPIHost = "${env.CPI_HOST}"
+	  CPIOAuthHost = "${env.CPI_OAUTH_HOST}"
+	  CPIOAuthCredentials = "${env.CPI_OAUTH_CRED}"	
+  }
 
-					//remove the zip
-					fileOperations([fileDeleteOperation(excludes: '', includes: tempfile)])
-						
-					dir(folder){
-						sh 'git add .'
-					}
-					println("Store integration artefact in Git")
-					withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: env.GITCredentials ,usernameVariable: 'GIT_AUTHOR_NAME', passwordVariable: 'GIT_PASSWORD']]) {  
-						sh 'git diff-index --quiet HEAD || git commit -am ' + '\'' + env.GitComment + '\''
-						sh('git push https://${GIT_AUTHOR_NAME}:${GIT_PASSWORD}@' + env.GITRepositoryURL + ' HEAD:' + env.GITBranch)
-					}				
-				}
-			}
-		}
+  stages {
+    stage('Generate oauth bearer token') {
+      steps {
+        script {
+          //get oauth token for Cloud Integration
+          println("requesting oauth token");
+          def getTokenResp = httpRequest acceptType: 'APPLICATION_JSON',
+            authentication: "${env.CPIOAuthCredentials}",
+            contentType: 'APPLICATION_JSON',
+            httpMode: 'POST',
+            responseHandle: 'LEAVE_OPEN',
+            timeout: 30,
+            url: 'https://' + env.CPIOAuthHost + '/oauth/token?grant_type=client_credentials';
+          def jsonObjToken = readJSON text: getTokenResp.content
+          def token = "Bearer " + jsonObjToken.access_token
+          env.token = token
+          getTokenResp.close();
+        }
+      }
     }
+
+    stage('Deploy integration flow and check for deployment success') {
+      steps {
+        script {
+          //deploy integration flow as specified in the configuration
+          println("Deploying integration flow.");
+          def deployResp = httpRequest httpMode: 'POST',
+            customHeaders: [
+              [maskValue: false, name: 'Authorization', value: env.token]
+            ],
+            ignoreSslErrors: true,
+            timeout: 30,
+            url: 'https://' + "${env.CPIHost}" + '/api/v1/DeployIntegrationDesigntimeArtifact?Id=\'' + "${env.IntegrationFlowID}" + '\'&Version=\'active\'';
+
+          //check deployment status
+          println("Start checking integration flow deployment status.");
+          Integer counter = 0;
+          def deploymentStatus;
+          def continueLoop = true;
+		  
+		      //check until max check counter reached or we have a final state
+          while (counter < env.DeploymentCheckRetryCounter.toInteger() & continueLoop == true) {
+            Thread.sleep(3000);
+            counter = counter + 1;
+            def statusResp = httpRequest acceptType: 'APPLICATION_JSON',
+              customHeaders: [
+                [maskValue: false, name: 'Authorization', value: env.token]
+              ],
+              httpMode: 'GET',
+              responseHandle: 'LEAVE_OPEN',
+              timeout: 30,
+              url: 'https://' + "${env.CPIHost}" + '/api/v1/IntegrationRuntimeArtifacts(\'' + "${env.IntegrationFlowID}" + '\')';
+            def jsonObj = readJSON text: statusResp.content;
+            deploymentStatus = jsonObj.d.Status;
+
+            println("Deployment status: " + deploymentStatus);
+			
+            if (deploymentStatus.equalsIgnoreCase("Error")) {
+              //in case of error, get the error details
+              def deploymentErrorResp = httpRequest acceptType: 'APPLICATION_JSON',
+                customHeaders: [
+                  [maskValue: false, name: 'Authorization', value: env.token]
+                ],
+                httpMode: 'GET',
+                responseHandle: 'LEAVE_OPEN',
+                timeout: 30,
+                url: 'https://' + "${env.CPIHost}" + '/api/v1/IntegrationRuntimeArtifacts(\'' + "${env.IntegrationFlowID}" + '\')' + '/ErrorInformation/$value';
+              def jsonErrObj = readJSON text: deploymentErrorResp.content
+              def deployErrorInfo = jsonErrObj.parameter;
+              println("Error Details: " + deployErrorInfo);
+              statusResp.close();
+              deploymentErrorResp.close();
+              //End the whole job
+              sh 'exit 1';
+            } else if (deploymentStatus.equalsIgnoreCase("Started")) {
+			        //Final status reached 
+              println("Integration flow deployment successful")
+              statusResp.close();
+              continueLoop = false
+            } else {
+			        //Continue checking 
+              println("The integration flow is not yet started. Will wait 3s and then check again.")
+            }
+          }
+		      //After exiting the loop, react to the deployment state
+          if (!deploymentStatus.equalsIgnoreCase("Started")) {
+		        //If status not is Started, end the pipeline.
+            println("No final deployment status reached. Current status: \'" + deploymentStatus);
+            sh 'exit 1';
+          } else {
+            if (env.GetEndpoint.equalsIgnoreCase("true")) {
+              //Get endpoint as configured above
+              def endpointResp = httpRequest acceptType: 'APPLICATION_JSON',
+                customHeaders: [
+                  [maskValue: false, name: 'Authorization', value: env.token]
+                ],
+                httpMode: 'GET',
+                responseHandle: 'LEAVE_OPEN',
+                timeout: 30,
+                url: 'https://' + "${env.CPIHost}" + '/api/v1/ServiceEndpoints?$filter=Name%20eq%20\'' + "${env.IntegrationFlowID}" + '\'&$select=EntryPoints&$format=json&$expand=EntryPoints'
+              def jsonEndpointObj = readJSON text: endpointResp.content;
+              def endpoint = jsonEndpointObj.d.results.EntryPoints.results.Url;
+              def size = (jsonEndpointObj.d.results.EntryPoints.results).size();
+              endpointResp.close();
+			        //check if the flow has an endpoint
+              if (size != 0) {
+                println("Endpoint: " + endpoint);
+              } else {
+                unstable("The specified integration flow does not have an endpoint. Please check the flow or tenant")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }

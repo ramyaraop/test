@@ -7,7 +7,7 @@ pipeline {
     GetEndpoint = true //If you don't need the endpoint or the artefact does not provide an endpoint, set the value to false
     DeploymentCheckRetryCounter = 20 //multiply by 3 to get the maximum deployment time
 	  CPIHost = "${env.CPI_HOST}"
-	  CPIOAuthHost = "${env.CPI_OAUTH_HOST}"
+	  CPIOAuthHost = "f46f9be9trial.authentication.us10.hana.ondemand.com"
 	  CPIOAuthCredentials = "${env.CPI_OAUTH_CRED}"	
   }
 
